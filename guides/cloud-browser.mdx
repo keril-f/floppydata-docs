@@ -3,7 +3,7 @@ title: "Automate a Cloud Browser"
 description: "Create a cloud browser session, connect with Playwright or Puppeteer, and reuse saved browser settings."
 ---
 
-Cloud Browser starts a browser synchronously and returns a signed WebSocket URL. Connect with Playwright or Puppeteer, navigate to the site you need, and stop the session when the job is complete.
+Cloud Browser starts a browser synchronously and returns a signed WebSocket URL. Use `startUrl` to open pages at launch, connect with Playwright or Puppeteer to work with them, and stop the session when the job is complete. You can also omit `startUrl` and navigate after connecting.
 
 <Warning>
   Creating a session starts a browser resource. Treat `connectUrl`, `liveViewUrl`, API keys, cookie values, and proxy credentials as secrets. Use placeholders in logs and support messages.
@@ -20,15 +20,27 @@ export FLOPPY_BASE_URL="https://api.floppydata.net"
 
 ## 1. Create a Session
 
-Every request field is optional. Start with `{}` to use a coherent Linux fingerprint, a residential proxy with sticky rotation, a 600-second timeout, and `keepAlive: false`.
+Every request field is optional. The smallest request, `{}`, uses a coherent Linux fingerprint, a residential proxy with sticky rotation, a 600-second timeout, and `keepAlive: false`. This example adds `startUrl` to open one page when the browser launches:
 
 ```bash
 curl --request POST \
   --url "$FLOPPY_BASE_URL/v2/browser/sessions" \
   --header "Content-Type: application/json" \
   --header "X-Api-Key: $FLOPPY_API_KEY" \
-  --data '{}'
+  --data '{"startUrl":"https://example.com/"}'
 ```
+
+To open multiple pages in separate tabs, use this JSON body in the same create request:
+
+```json
+{
+  "startUrl": "https://example.com/,https://example.org/"
+}
+```
+
+`startUrl` is a single string. Separate multiple URLs with commas without spaces; JSON arrays are not accepted. Each URL must be an absolute HTTP or HTTPS URL. The complete string, including commas, can contain up to 2,048 characters. Percent-encode commas inside an individual URL as `%2C`.
+
+Send `startUrl` only when omitting `settings.id`. When reusing saved settings, omit `startUrl` and use your automation client to navigate if needed.
 
 The response contains:
 
@@ -42,9 +54,11 @@ Store the session ID and settings ID. Do not construct or persist the signed con
 
 For a local test, provide the returned `connectUrl` as `FLOPPY_CONNECT_URL` in the process environment. Keep it out of source control and shell history.
 
-## 2. Connect and Navigate
+## 2. Connect and Use the Opened Tabs
 
-Cloud Browser does not accept `startUrl`. Connect first, then navigate with your automation client.
+Choose either Playwright or Puppeteer below. Both examples use the `https://example.com/` tab opened by either request in step 1. They select the tab by URL and wait for its heading before reading the title. A successful create response does not guarantee that page content has finished loading.
+
+For other sites, match the destination URL if the page redirects, and wait for the content your task needs. With multiple start URLs, select each tab by its URL rather than relying on tab order.
 
 ### Playwright
 
@@ -55,12 +69,23 @@ const connectUrl = process.env.FLOPPY_CONNECT_URL;
 if (!connectUrl) throw new Error('FLOPPY_CONNECT_URL is required');
 
 const browser = await chromium.connectOverCDP(connectUrl);
-const context = browser.contexts()[0];
-const page = context.pages()[0] ?? (await context.newPage());
+try {
+  const context = browser.contexts()[0];
+  const targetUrl = 'https://example.com/';
+  const deadline = Date.now() + 30_000;
+  let page = context.pages().find((page) => page.url() === targetUrl);
 
-await page.goto('https://example.com');
-console.log(await page.title());
-await browser.close();
+  while (!page && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    page = context.pages().find((page) => page.url() === targetUrl);
+  }
+  if (!page) throw new Error('The requested start URL did not open');
+
+  await page.locator('h1').waitFor({ timeout: 30_000 });
+  console.log(await page.title());
+} finally {
+  await browser.close();
+}
 ```
 
 ### Puppeteer
@@ -72,13 +97,22 @@ const connectUrl = process.env.FLOPPY_CONNECT_URL;
 if (!connectUrl) throw new Error('FLOPPY_CONNECT_URL is required');
 
 const browser = await puppeteer.connect({ browserWSEndpoint: connectUrl });
-const pages = await browser.pages();
-const page = pages[0] ?? (await browser.newPage());
+try {
+  const target = await browser.waitForTarget(
+    (target) => target.type() === 'page' && target.url() === 'https://example.com/',
+    { timeout: 30_000 },
+  );
+  const page = await target.page();
+  if (!page) throw new Error('The requested start URL did not open');
 
-await page.goto('https://example.com');
-console.log(await page.title());
-await browser.disconnect();
+  await page.waitForSelector('h1', { timeout: 30_000 });
+  console.log(await page.title());
+} finally {
+  await browser.disconnect();
+}
 ```
+
+To navigate an existing tab later, call `page.goto('https://example.org/')` before disconnecting. If you created the session without `startUrl`, create a tab with `context.newPage()` in Playwright or `browser.newPage()` in Puppeteer, then call `page.goto()` with your target URL.
 
 The relay permits one active connection per session. Its heartbeat is handled by Floppydata; your client does not need to send a custom keepalive command.
 
@@ -96,7 +130,7 @@ With the default `keepAlive: false`, closing the relay also stops the session. W
 
 ## Customize a New Browser
 
-Send only the groups you need. This example sets viewport and fingerprint preferences, targets a US residential proxy, extends the runtime, and attaches caller-owned metadata.
+Send only the groups you need. This example sets viewport and fingerprint preferences, targets a US residential proxy, extends the runtime, opens two pages at launch, and attaches caller-owned metadata.
 
 ```json
 {
@@ -122,6 +156,7 @@ Send only the groups you need. This example sets viewport and fingerprint prefer
     "rotation": { "mode": "sticky" }
   },
   "runtime": { "timeoutSeconds": 1800, "keepAlive": true },
+  "startUrl": "https://example.com/,https://example.org/",
   "metadata": { "taskId": "checkout-42" }
 }
 ```
@@ -132,6 +167,7 @@ Send only the groups you need. This example sets viewport and fingerprint prefer
 | `browser.fingerprint` | Choose OS, locale, timezone, geolocation, hardware, and masking. | Custom user agent, screen, hardware, and masking require `strategy: "custom"`. |
 | `proxy` | Choose residential, mobile, or datacenter traffic and optional location, ASN, and rotation. | City or state requires `countryCode`; do not send city and state together. |
 | `runtime` | Set hard lifetime and reconnection behavior. | `timeoutSeconds` is 60–21,600; default is 600. |
+| `startUrl` | Open one or more pages at launch. | One string of absolute HTTP or HTTPS URLs, separated by commas without spaces; 2,048 characters total. Omit with `settings.id`. |
 | `metadata` | Correlate the session with your own job. | Serialized metadata must not exceed 4 KiB. |
 
 For interval rotation, use `mode: "interval"` with `intervalMinutes` set to `5`, `10`, `15`, `20`, or `60`. Use `mode: "perRequest"` for a new proxy IP per request, or `mode: "sticky"` with an optional caller-defined `stickyKey`.
@@ -174,7 +210,7 @@ Reuse `settings.id` to restore the same saved identity and browser state.
 }
 ```
 
-You cannot combine `settings.id` with `browser` or `proxy`; that prevents accidental identity mutation. You can still send cookies, runtime options, and metadata. One active session can use a settings ID at a time.
+You cannot combine `settings.id` with `browser`, `proxy`, or `startUrl`. Use your automation client to navigate after connecting to the new session. You can still send cookies, runtime options, and metadata. One active session can use a settings ID at a time.
 
 Each account can keep up to 20 saved settings. Session history includes `settings.id`, so you can recover an ID without a separate settings-list endpoint.
 
