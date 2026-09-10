@@ -4,8 +4,18 @@ openapi: '/api-reference/openapi.json POST /v2/browser/sessions'
 ---
 
 <Note>
-  The smallest request is `{}`. The response includes a signed `connectUrl` and an opaque `settings.id`; connect first, then navigate with Playwright or Puppeteer. The API does not accept `startUrl`.
+  The smallest request is `{}`. Add optional `startUrl` to open one or more pages at launch: supply absolute HTTP or HTTPS URLs in one string, separated by commas without spaces, up to 2,048 characters total. Omit `startUrl` when supplying `settings.id`.
 </Note>
+
+For example, this request body opens two separate tabs:
+
+```json
+{
+  "startUrl": "https://example.com/,https://example.org/"
+}
+```
+
+Connect with the returned `connectUrl` to work with the opened tabs. Select the tab by URL and wait for the page content you need. If you omit `startUrl`, navigate with Playwright or Puppeteer after connecting.
 
 <Card title="Follow the Cloud Browser guide" icon="browser" href="/guides/cloud-browser">
   Create, connect, navigate, reuse settings, and stop a browser safely.
